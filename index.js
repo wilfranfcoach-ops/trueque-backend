@@ -24,6 +24,7 @@ async function initDB() {
       email TEXT REFERENCES usuarios(email),
       tipo TEXT CHECK (tipo IN ('ofrece', 'necesita')),
       nombre TEXT,
+      estado TEXT DEFAULT 'activo',
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -36,8 +37,8 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
   const { rows: candidatos } = await pool.query(
     `SELECT u.email, u.telefono, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
      FROM usuarios u
-     JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece'
-     JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita'
+     JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece' AND s_ofrece.estado = 'activo'
+     JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita' AND s_necesita.estado = 'activo'
      WHERE LOWER(s_ofrece.nombre) LIKE LOWER($1)
      AND u.email != ALL($2)`,
     [`%${necesita}%`, [emailOrigen, ...visitados]]
@@ -76,7 +77,7 @@ app.post("/buscar-red", async (req, res) => {
     );
     await pool.query(`DELETE FROM servicios WHERE email = $1`, [email]);
     await pool.query(
-      `INSERT INTO servicios (email, tipo, nombre) VALUES ($1, 'ofrece', $2), ($1, 'necesita', $3)`,
+      `INSERT INTO servicios (email, tipo, nombre, estado) VALUES ($1, 'ofrece', $2, 'activo'), ($1, 'necesita', $3, 'activo')`,
       [email, ofrece, necesita]
     );
 
@@ -88,6 +89,53 @@ app.post("/buscar-red", async (req, res) => {
     } else {
       res.json({ encontrada: false, red: [] });
     }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// Obtener servicios del usuario
+app.get("/mis-servicios/:email", async (req, res) => {
+  const { email } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.id, s.tipo, s.nombre, s.estado, u.telefono
+       FROM servicios s
+       JOIN usuarios u ON s.email = u.email
+       WHERE s.email = $1
+       ORDER BY s.created_at DESC`,
+      [email]
+    );
+    res.json({ servicios: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// Cambiar estado de un servicio
+app.patch("/servicio/:id/estado", async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+  try {
+    await pool.query(
+      `UPDATE servicios SET estado = $1 WHERE id = $2`,
+      [estado, id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// Eliminar un servicio
+app.delete("/servicio/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query(`DELETE FROM servicios WHERE id = $1`, [id]);
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Error en el servidor" });
