@@ -16,6 +16,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS usuarios (
       email TEXT PRIMARY KEY,
       nombre TEXT,
+      telefono TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS servicios (
@@ -23,7 +24,6 @@ async function initDB() {
       email TEXT REFERENCES usuarios(email),
       tipo TEXT CHECK (tipo IN ('ofrece', 'necesita')),
       nombre TEXT,
-      telefono TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -34,7 +34,7 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
   if (profundidad > 5) return null;
 
   const { rows: candidatos } = await pool.query(
-    `SELECT u.email, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita, s_ofrece.telefono as telefono
+    `SELECT u.email, u.telefono, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
      FROM usuarios u
      JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece'
      JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita'
@@ -44,57 +44,4 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
   );
 
   for (const candidato of candidatos) {
-    const nuevaEntrada = { 
-      email: candidato.email, 
-      servicio: candidato.ofrece,
-      telefono: candidato.telefono || ""
-    };
-    const nuevosVisitados = [...visitados, candidato.email];
-    const nuevaCadena = [...cadena, nuevaEntrada];
-
-    if (candidato.necesita.toLowerCase().includes(origenOfrece.toLowerCase())) {
-      return nuevaCadena;
-    }
-
-    const redProfunda = await buscarRed(emailOrigen, origenOfrece, candidato.necesita, nuevosVisitados, nuevaCadena, profundidad + 1);
-    if (redProfunda) return redProfunda;
-  }
-  return null;
-}
-
-app.post("/buscar-red", async (req, res) => {
-  const { email, ofrece, necesita, telefono } = req.body;
-  if (!email || !ofrece || !necesita) {
-    return res.status(400).json({ error: "Faltan datos" });
-  }
-
-  try {
-    await pool.query(`INSERT INTO usuarios (email) VALUES ($1) ON CONFLICT (email) DO NOTHING`, [email]);
-    await pool.query(`DELETE FROM servicios WHERE email = $1`, [email]);
-    await pool.query(
-      `INSERT INTO servicios (email, tipo, nombre, telefono) VALUES ($1, 'ofrece', $2, $4), ($1, 'necesita', $3, $4)`,
-      [email, ofrece, necesita, telefono || null]
-    );
-
-    const cadenaInicial = [{ email, servicio: necesita, telefono: telefono || "" }];
-    const red = await buscarRed(email, ofrece, necesita, [email], cadenaInicial);
-
-    if (red) {
-      res.json({ encontrada: true, red });
-    } else {
-      res.json({ encontrada: false, red: [] });
-    }
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Error en el servidor" });
-  }
-});
-
-app.get("/", (req, res) => {
-  res.json({ status: "Trueque Backend con PostgreSQL funcionando" });
-});
-
-initDB().then(() => {
-  const PORT = process.env.PORT || 4000;
-  app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`));
-});
+    const
