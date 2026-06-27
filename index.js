@@ -44,4 +44,61 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
   );
 
   for (const candidato of candidatos) {
-    const
+    const nuevaEntrada = {
+      email: candidato.email,
+      servicio: candidato.ofrece,
+      telefono: candidato.telefono || ""
+    };
+    const nuevosVisitados = [...visitados, candidato.email];
+    const nuevaCadena = [...cadena, nuevaEntrada];
+
+    if (candidato.necesita.toLowerCase().includes(origenOfrece.toLowerCase())) {
+      return nuevaCadena;
+    }
+
+    const redProfunda = await buscarRed(emailOrigen, origenOfrece, candidato.necesita, nuevosVisitados, nuevaCadena, profundidad + 1);
+    if (redProfunda) return redProfunda;
+  }
+  return null;
+}
+
+app.post("/buscar-red", async (req, res) => {
+  const { email, ofrece, necesita, telefono } = req.body;
+  if (!email || !ofrece || !necesita) {
+    return res.status(400).json({ error: "Faltan datos" });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO usuarios (email, telefono) VALUES ($1, $2)
+       ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono`,
+      [email, telefono || null]
+    );
+    await pool.query(`DELETE FROM servicios WHERE email = $1`, [email]);
+    await pool.query(
+      `INSERT INTO servicios (email, tipo, nombre) VALUES ($1, 'ofrece', $2), ($1, 'necesita', $3)`,
+      [email, ofrece, necesita]
+    );
+
+    const cadenaInicial = [{ email, servicio: necesita, telefono: telefono || "" }];
+    const red = await buscarRed(email, ofrece, necesita, [email], cadenaInicial);
+
+    if (red) {
+      res.json({ encontrada: true, red });
+    } else {
+      res.json({ encontrada: false, red: [] });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+app.get("/", (req, res) => {
+  res.json({ status: "Trueque Backend con PostgreSQL funcionando" });
+});
+
+initDB().then(() => {
+  const PORT = process.env.PORT || 4000;
+  app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`));
+});
