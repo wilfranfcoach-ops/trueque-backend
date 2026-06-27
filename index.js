@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(cors());
@@ -10,6 +11,24 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+async function sonSimilares(servicio1, servicio2) {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const prompt = `¿Son estos dos servicios equivalentes o muy similares en el contexto de intercambio de servicios entre personas? Responde SOLO con "SI" o "NO".
+Servicio 1: "${servicio1}"
+Servicio 2: "${servicio2}"`;
+    const result = await model.generateContent(prompt);
+    const texto = result.response.text().trim().toUpperCase();
+    return texto.includes("SI");
+  } catch (err) {
+    console.error("Error Gemini:", err);
+    return servicio1.toLowerCase().includes(servicio2.toLowerCase()) ||
+           servicio2.toLowerCase().includes(servicio1.toLowerCase());
+  }
+}
 
 async function initDB() {
   await pool.query(`
@@ -40,12 +59,14 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
      FROM usuarios u
      JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece' AND s_ofrece.estado = 'activo'
      JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita' AND s_necesita.estado = 'activo'
-     WHERE LOWER(s_ofrece.nombre) LIKE LOWER($1)
-     AND u.email != ALL($2)`,
-    [`%${necesita}%`, [emailOrigen, ...visitados]]
+     WHERE u.email != ALL($1)`,
+    [[emailOrigen, ...visitados]]
   );
 
   for (const candidato of candidatos) {
+    const ofreceMatch = await sonSimilares(candidato.ofrece, necesita);
+    if (!ofreceMatch) continue;
+
     const nuevaEntrada = {
       email: candidato.email,
       servicio: candidato.ofrece,
@@ -56,9 +77,8 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    if (candidato.necesita.toLowerCase().includes(origenOfrece.toLowerCase())) {
-      return nuevaCadena;
-    }
+    const cierraRed = await sonSimilares(candidato.necesita, origenOfrece);
+    if (cierraRed) return nuevaCadena;
 
     const redProfunda = await buscarRed(emailOrigen, origenOfrece, candidato.necesita, nuevosVisitados, nuevaCadena, profundidad + 1);
     if (redProfunda) return redProfunda;
@@ -140,7 +160,7 @@ app.delete("/servicio/:id", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({ status: "Trueque Backend con PostgreSQL funcionando" });
+  res.json({ status: "Trueque Backend con IA Semántica funcionando" });
 });
 
 initDB().then(() => {
