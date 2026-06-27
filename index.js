@@ -17,6 +17,7 @@ async function initDB() {
       email TEXT PRIMARY KEY,
       nombre TEXT,
       telefono TEXT,
+      foto TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS servicios (
@@ -35,7 +36,7 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
   if (profundidad > 5) return null;
 
   const { rows: candidatos } = await pool.query(
-    `SELECT u.email, u.telefono, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
+    `SELECT u.email, u.telefono, u.nombre, u.foto, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
      FROM usuarios u
      JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece' AND s_ofrece.estado = 'activo'
      JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita' AND s_necesita.estado = 'activo'
@@ -48,7 +49,9 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     const nuevaEntrada = {
       email: candidato.email,
       servicio: candidato.ofrece,
-      telefono: candidato.telefono || ""
+      telefono: candidato.telefono || "",
+      nombre: candidato.nombre || "",
+      foto: candidato.foto || ""
     };
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
@@ -64,16 +67,16 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
 }
 
 app.post("/buscar-red", async (req, res) => {
-  const { email, ofrece, necesita, telefono } = req.body;
+  const { email, ofrece, necesita, telefono, foto, nombre } = req.body;
   if (!email || !ofrece || !necesita) {
     return res.status(400).json({ error: "Faltan datos" });
   }
 
   try {
     await pool.query(
-      `INSERT INTO usuarios (email, telefono) VALUES ($1, $2)
-       ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono`,
-      [email, telefono || null]
+      `INSERT INTO usuarios (email, telefono, foto, nombre) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono, foto = EXCLUDED.foto, nombre = EXCLUDED.nombre`,
+      [email, telefono || null, foto || null, nombre || null]
     );
     await pool.query(`DELETE FROM servicios WHERE email = $1`, [email]);
     await pool.query(
@@ -81,7 +84,7 @@ app.post("/buscar-red", async (req, res) => {
       [email, ofrece, necesita]
     );
 
-    const cadenaInicial = [{ email, servicio: necesita, telefono: telefono || "" }];
+    const cadenaInicial = [{ email, servicio: necesita, telefono: telefono || "", nombre: nombre || "", foto: foto || "" }];
     const red = await buscarRed(email, ofrece, necesita, [email], cadenaInicial);
 
     if (red) {
@@ -95,7 +98,6 @@ app.post("/buscar-red", async (req, res) => {
   }
 });
 
-// Obtener servicios del usuario
 app.get("/mis-servicios/:email", async (req, res) => {
   const { email } = req.params;
   try {
@@ -114,15 +116,11 @@ app.get("/mis-servicios/:email", async (req, res) => {
   }
 });
 
-// Cambiar estado de un servicio
 app.patch("/servicio/:id/estado", async (req, res) => {
   const { id } = req.params;
   const { estado } = req.body;
   try {
-    await pool.query(
-      `UPDATE servicios SET estado = $1 WHERE id = $2`,
-      [estado, id]
-    );
+    await pool.query(`UPDATE servicios SET estado = $1 WHERE id = $2`, [estado, id]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -130,7 +128,6 @@ app.patch("/servicio/:id/estado", async (req, res) => {
   }
 });
 
-// Eliminar un servicio
 app.delete("/servicio/:id", async (req, res) => {
   const { id } = req.params;
   try {
