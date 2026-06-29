@@ -16,7 +16,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 async function sonSimilares(servicio1, servicio2) {
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });   
     const prompt = `¿Son estos dos servicios equivalentes o muy similares en el contexto de intercambio de servicios entre personas? Responde SOLO con "SI" o "NO".
 Servicio 1: "${servicio1}"
 Servicio 2: "${servicio2}"`;
