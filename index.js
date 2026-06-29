@@ -14,21 +14,7 @@ const pool = new Pool({
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-async function sonSimilares(servicio1, servicio2) {
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });   
-    const prompt = `¿Son estos dos servicios equivalentes o muy similares en el contexto de intercambio de servicios entre personas? Responde SOLO con "SI" o "NO".
-Servicio 1: "${servicio1}"
-Servicio 2: "${servicio2}"`;
-    const result = await model.generateContent(prompt);
-    const texto = result.response.text().trim().toUpperCase();
-    return texto.includes("SI");
-  } catch (err) {
-    console.error("Error Gemini:", err);
-    return servicio1.toLowerCase().includes(servicio2.toLowerCase()) ||
-           servicio2.toLowerCase().includes(servicio1.toLowerCase());
-  }
-}
+
 
 async function initDB() {
   await pool.query(`
@@ -51,6 +37,31 @@ async function initDB() {
   console.log("Base de datos lista");
 }
 
+async function encontrarCandidatosSemanticos(necesita, candidatos) {
+  if (candidatos.length === 0) return [];
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
+    const prompt = `Tengo un usuario que necesita: "${necesita}"
+¿Cuáles de estos servicios son equivalentes o muy similares a lo que necesita?
+${lista}
+Responde SOLO con los números separados por comas, ejemplo: 0,2,3
+Si ninguno coincide responde: ninguno`;
+    const result = await model.generateContent(prompt);
+    const texto = result.response.text().trim();
+    if (texto.toLowerCase().includes("ninguno")) return [];
+    const indices = texto.split(",").map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+    return indices.map(i => candidatos[i]).filter(Boolean);
+  } catch (err) {
+    console.error("Error Gemini:", err);
+    // Fallback a búsqueda simple si falla Gemini
+    return candidatos.filter(c =>
+      c.ofrece.toLowerCase().includes(necesita.toLowerCase()) ||
+      necesita.toLowerCase().includes(c.ofrece.toLowerCase())
+    );
+  }
+}
+
 async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], cadena = [], profundidad = 0) {
   if (profundidad > 5) return null;
 
@@ -63,10 +74,10 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     [[emailOrigen, ...visitados]]
   );
 
-  for (const candidato of candidatos) {
-    const ofreceMatch = await sonSimilares(candidato.ofrece, necesita);
-    if (!ofreceMatch) continue;
+  // Una sola llamada Gemini para todos los candidatos
+  const coincidentes = await encontrarCandidatosSemanticos(necesita, candidatos);
 
+  for (const candidato of coincidentes) {
     const nuevaEntrada = {
       email: candidato.email,
       servicio: candidato.ofrece,
@@ -77,8 +88,9 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    const cierraRed = await sonSimilares(candidato.necesita, origenOfrece);
-    if (cierraRed) return nuevaCadena;
+    // Verificar si cierra la red con una sola llamada
+    const cierraMatch = await encontrarCandidatosSemanticos(origenOfrece, [{ ofrece: candidato.necesita }]);
+    if (cierraMatch.length > 0) return nuevaCadena;
 
     const redProfunda = await buscarRed(emailOrigen, origenOfrece, candidato.necesita, nuevosVisitados, nuevaCadena, profundidad + 1);
     if (redProfunda) return redProfunda;
