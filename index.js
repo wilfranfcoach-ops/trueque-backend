@@ -31,11 +31,12 @@ Si ninguno coincide responde: ninguno`
       max_tokens: 50
     });
     const texto = completion.choices[0].message.content.trim();
+    console.log(`Groq respuesta para "${necesita}": ${texto}`);
     if (texto.toLowerCase().includes("ninguno")) return [];
     const indices = texto.split(",").map(n => parseInt(n.trim())).filter(n => !isNaN(n));
     return indices.map(i => candidatos[i]).filter(Boolean);
   } catch (err) {
-    console.error("Error Groq:", err);
+    console.error("Error Groq:", err.message);
     return candidatos.filter(c =>
       c.ofrece.toLowerCase().includes(necesita.toLowerCase()) ||
       necesita.toLowerCase().includes(c.ofrece.toLowerCase())
@@ -67,6 +68,8 @@ async function initDB() {
 async function buscarRed(emailOrigen, origenOfrece, necesitaActual, visitados = [], cadena = [], profundidad = 0) {
   if (profundidad > 6) return null;
 
+  console.log(`Profundidad ${profundidad}: buscando quien ofrece "${necesitaActual}"`);
+
   const { rows: candidatos } = await pool.query(
     `SELECT u.email, u.telefono, u.nombre, u.foto, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
      FROM usuarios u
@@ -76,7 +79,11 @@ async function buscarRed(emailOrigen, origenOfrece, necesitaActual, visitados = 
     [[emailOrigen, ...visitados]]
   );
 
+  console.log(`Candidatos encontrados: ${candidatos.length}`);
+  candidatos.forEach(c => console.log(`  - ${c.email} ofrece: ${c.ofrece} necesita: ${c.necesita}`));
+
   const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, candidatos);
+  console.log(`Coincidentes semanticos: ${coincidentes.length}`);
 
   for (const candidato of coincidentes) {
     const nuevaEntrada = {
@@ -89,8 +96,10 @@ async function buscarRed(emailOrigen, origenOfrece, necesitaActual, visitados = 
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
+    console.log(`Verificando si ${candidato.email} cierra red: necesita "${candidato.necesita}", origen ofrece "${origenOfrece}"`);
     const cierraRed = await encontrarCandidatosSemanticos(candidato.necesita, [{ ofrece: origenOfrece }]);
     if (cierraRed.length > 0) {
+      console.log(`RED CERRADA con ${candidato.email}`);
       return nuevaCadena;
     }
 
