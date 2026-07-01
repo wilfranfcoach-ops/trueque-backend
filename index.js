@@ -19,7 +19,7 @@ async function encontrarCandidatosSemanticos(necesita, candidatos) {
   try {
     const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
     const completion = await groq.chat.completions.create({
-      model: "llama3-8b-8192",
+      model: "llama-3.3-70b-versatile",
       messages: [{
         role: "user",
         content: `Tengo un usuario que necesita: "${necesita}"
