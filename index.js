@@ -59,7 +59,8 @@ async function initDB() {
       tipo TEXT CHECK (tipo IN ('ofrece', 'necesita')),
       nombre TEXT,
       estado TEXT DEFAULT 'activo',
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE (email, tipo, nombre)
     );
   `);
   console.log("Base de datos lista");
@@ -128,9 +129,11 @@ app.post("/buscar-red", async (req, res) => {
        ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono, foto = EXCLUDED.foto, nombre = EXCLUDED.nombre`,
       [email, telefono || null, foto || null, nombre || null]
     );
-    await pool.query(`DELETE FROM servicios WHERE email = $1`, [email]);
+
+    // Ya NO se borran los servicios anteriores. Se agregan (o reactivan si ya existían).
     await pool.query(
-      `INSERT INTO servicios (email, tipo, nombre, estado) VALUES ($1, 'ofrece', $2, 'activo'), ($1, 'necesita', $3, 'activo')`,
+      `INSERT INTO servicios (email, tipo, nombre, estado) VALUES ($1, 'ofrece', $2, 'activo'), ($1, 'necesita', $3, 'activo')
+       ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo'`,
       [email, ofrece, necesita]
     );
 
