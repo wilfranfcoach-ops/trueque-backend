@@ -64,8 +64,8 @@ async function initDB() {
   console.log("Base de datos lista");
 }
 
-async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], cadena = [], profundidad = 0) {
-  if (profundidad > 5) return null;
+async function buscarRed(emailOrigen, origenOfrece, necesitaActual, visitados = [], cadena = [], profundidad = 0) {
+  if (profundidad > 6) return null;
 
   const { rows: candidatos } = await pool.query(
     `SELECT u.email, u.telefono, u.nombre, u.foto, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
@@ -76,7 +76,7 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     [[emailOrigen, ...visitados]]
   );
 
-  const coincidentes = await encontrarCandidatosSemanticos(necesita, candidatos);
+  const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, candidatos);
 
   for (const candidato of coincidentes) {
     const nuevaEntrada = {
@@ -89,10 +89,19 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    const cierraMatch = await encontrarCandidatosSemanticos(origenOfrece, [{ ofrece: candidato.necesita }]);
-    if (cierraMatch.length > 0) return nuevaCadena;
+    const cierraRed = await encontrarCandidatosSemanticos(candidato.necesita, [{ ofrece: origenOfrece }]);
+    if (cierraRed.length > 0) {
+      return nuevaCadena;
+    }
 
-    const redProfunda = await buscarRed(emailOrigen, origenOfrece, candidato.necesita, nuevosVisitados, nuevaCadena, profundidad + 1);
+    const redProfunda = await buscarRed(
+      emailOrigen,
+      origenOfrece,
+      candidato.necesita,
+      nuevosVisitados,
+      nuevaCadena,
+      profundidad + 1
+    );
     if (redProfunda) return redProfunda;
   }
   return null;
@@ -116,7 +125,14 @@ app.post("/buscar-red", async (req, res) => {
       [email, ofrece, necesita]
     );
 
-    const cadenaInicial = [{ email, servicio: necesita, telefono: telefono || "", nombre: nombre || "", foto: foto || "" }];
+    const cadenaInicial = [{
+      email,
+      servicio: ofrece,
+      telefono: telefono || "",
+      nombre: nombre || "",
+      foto: foto || ""
+    }];
+
     const red = await buscarRed(email, ofrece, necesita, [email], cadenaInicial);
 
     if (red) {
@@ -178,4 +194,4 @@ app.get("/", (req, res) => {
 initDB().then(() => {
   const PORT = process.env.PORT || 4000;
   app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`));
-});  
+});
