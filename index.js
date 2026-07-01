@@ -72,22 +72,31 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
 
   console.log(`Profundidad ${profundidad}: buscando quien ofrece "${necesitaActual}"`);
 
-  const { rows: candidatos } = await pool.query(
-    `SELECT u.email, u.telefono, u.nombre, u.foto, s_ofrece.nombre as ofrece, s_necesita.nombre as necesita
+  // IMPORTANTE: se busca solo por lo que la gente OFRECE, sin cruzar con sus necesidades.
+  // Cruzar ofrece x necesita en la misma consulta genera combinaciones falsas cuando
+  // alguien tiene varios servicios (ej: "ofrece Lavar carro" no tiene relación real
+  // con "necesita Contabilidad" solo porque son del mismo usuario).
+  const { rows: ofertantes } = await pool.query(
+    `SELECT DISTINCT u.email, u.telefono, u.nombre, u.foto, s.nombre as ofrece
      FROM usuarios u
-     JOIN servicios s_ofrece ON u.email = s_ofrece.email AND s_ofrece.tipo = 'ofrece' AND s_ofrece.estado = 'activo'
-     JOIN servicios s_necesita ON u.email = s_necesita.email AND s_necesita.tipo = 'necesita' AND s_necesita.estado = 'activo'
+     JOIN servicios s ON u.email = s.email AND s.tipo = 'ofrece' AND s.estado = 'activo'
      WHERE u.email != ALL($1)`,
     [[emailOrigen, ...visitados]]
   );
 
-  console.log(`Candidatos encontrados: ${candidatos.length}`);
-  candidatos.forEach(c => console.log(`  - ${c.email} ofrece: ${c.ofrece} necesita: ${c.necesita}`));
+  console.log(`Ofertantes encontrados: ${ofertantes.length}`);
 
-  const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, candidatos);
+  const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, ofertantes);
   console.log(`Coincidentes semanticos: ${coincidentes.length}`);
 
   for (const candidato of coincidentes) {
+    // Se traen TODAS las necesidades activas reales de este candidato (no una sola cruzada al azar)
+    const { rows: necesidadesCandidato } = await pool.query(
+      `SELECT nombre FROM servicios WHERE email = $1 AND tipo = 'necesita' AND estado = 'activo'`,
+      [candidato.email]
+    );
+    if (necesidadesCandidato.length === 0) continue; // no tiene necesidades activas, no puede continuar la cadena
+
     const nuevaEntrada = {
       email: candidato.email,
       servicio: candidato.ofrece,
@@ -98,28 +107,32 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    // La red se cierra si lo que este candidato necesita coincide con
-    // CUALQUIERA de los servicios que ofrece el usuario origen.
-    const cierre = await encontrarCandidatosSemanticos(
-      candidato.necesita,
-      ofertasOrigen.map(o => ({ ofrece: o }))
-    );
-    if (cierre.length > 0) {
-      console.log(`RED CERRADA con ${candidato.email} (origen ofrece: ${cierre[0].ofrece})`);
-      // Se completa el nodo origen (índice 0) con el servicio específico que cerró la red
-      nuevaCadena[0] = { ...nuevaCadena[0], servicio: cierre[0].ofrece };
-      return nuevaCadena;
+    // 1) Antes de profundizar, se revisa si CUALQUIERA de las necesidades de este
+    // candidato cierra directo con CUALQUIERA de los servicios que ofrece el origen.
+    for (const nec of necesidadesCandidato) {
+      const cierre = await encontrarCandidatosSemanticos(
+        nec.nombre,
+        ofertasOrigen.map(o => ({ ofrece: o }))
+      );
+      if (cierre.length > 0) {
+        console.log(`RED CERRADA con ${candidato.email} (origen ofrece: ${cierre[0].ofrece})`);
+        nuevaCadena[0] = { ...nuevaCadena[0], servicio: cierre[0].ofrece };
+        return nuevaCadena;
+      }
     }
 
-    const redProfunda = await buscarRed(
-      emailOrigen,
-      ofertasOrigen,
-      candidato.necesita,
-      nuevosVisitados,
-      nuevaCadena,
-      profundidad + 1
-    );
-    if (redProfunda) return redProfunda;
+    // 2) Si no cerró directo, se intenta profundizar usando cada una de sus necesidades
+    for (const nec of necesidadesCandidato) {
+      const redProfunda = await buscarRed(
+        emailOrigen,
+        ofertasOrigen,
+        nec.nombre,
+        nuevosVisitados,
+        nuevaCadena,
+        profundidad + 1
+      );
+      if (redProfunda) return redProfunda;
+    }
   }
   return null;
 }
