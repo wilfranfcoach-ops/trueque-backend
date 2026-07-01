@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk");
 
 const app = express();
 app.use(cors());
@@ -12,9 +12,36 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-
+async function encontrarCandidatosSemanticos(necesita, candidatos) {
+  if (candidatos.length === 0) return [];
+  try {
+    const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
+    const completion = await groq.chat.completions.create({
+      model: "llama3-8b-8192",
+      messages: [{
+        role: "user",
+        content: `Tengo un usuario que necesita: "${necesita}"
+¿Cuáles de estos servicios son equivalentes o muy similares a lo que necesita?
+${lista}
+Responde SOLO con los números separados por comas, ejemplo: 0,2,3
+Si ninguno coincide responde: ninguno`
+      }],
+      max_tokens: 50
+    });
+    const texto = completion.choices[0].message.content.trim();
+    if (texto.toLowerCase().includes("ninguno")) return [];
+    const indices = texto.split(",").map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+    return indices.map(i => candidatos[i]).filter(Boolean);
+  } catch (err) {
+    console.error("Error Groq:", err);
+    return candidatos.filter(c =>
+      c.ofrece.toLowerCase().includes(necesita.toLowerCase()) ||
+      necesita.toLowerCase().includes(c.ofrece.toLowerCase())
+    );
+  }
+}
 
 async function initDB() {
   await pool.query(`
@@ -37,31 +64,6 @@ async function initDB() {
   console.log("Base de datos lista");
 }
 
-async function encontrarCandidatosSemanticos(necesita, candidatos) {
-  if (candidatos.length === 0) return [];
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
-    const prompt = `Tengo un usuario que necesita: "${necesita}"
-¿Cuáles de estos servicios son equivalentes o muy similares a lo que necesita?
-${lista}
-Responde SOLO con los números separados por comas, ejemplo: 0,2,3
-Si ninguno coincide responde: ninguno`;
-    const result = await model.generateContent(prompt);
-    const texto = result.response.text().trim();
-    if (texto.toLowerCase().includes("ninguno")) return [];
-    const indices = texto.split(",").map(n => parseInt(n.trim())).filter(n => !isNaN(n));
-    return indices.map(i => candidatos[i]).filter(Boolean);
-  } catch (err) {
-    console.error("Error Gemini:", err);
-    // Fallback a búsqueda simple si falla Gemini
-    return candidatos.filter(c =>
-      c.ofrece.toLowerCase().includes(necesita.toLowerCase()) ||
-      necesita.toLowerCase().includes(c.ofrece.toLowerCase())
-    );
-  }
-}
-
 async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], cadena = [], profundidad = 0) {
   if (profundidad > 5) return null;
 
@@ -74,7 +76,6 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     [[emailOrigen, ...visitados]]
   );
 
-  // Una sola llamada Gemini para todos los candidatos
   const coincidentes = await encontrarCandidatosSemanticos(necesita, candidatos);
 
   for (const candidato of coincidentes) {
@@ -88,7 +89,6 @@ async function buscarRed(emailOrigen, origenOfrece, necesita, visitados = [], ca
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    // Verificar si cierra la red con una sola llamada
     const cierraMatch = await encontrarCandidatosSemanticos(origenOfrece, [{ ofrece: candidato.necesita }]);
     if (cierraMatch.length > 0) return nuevaCadena;
 
@@ -172,10 +172,10 @@ app.delete("/servicio/:id", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({ status: "Trueque Backend con IA Semántica funcionando" });
+  res.json({ status: "Trueque Backend con Groq AI funcionando" });
 });
 
 initDB().then(() => {
   const PORT = process.env.PORT || 4000;
   app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`));
-});
+});  
