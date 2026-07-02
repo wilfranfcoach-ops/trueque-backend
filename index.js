@@ -14,6 +14,42 @@ const pool = new Pool({
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+const { Resend } = require("resend");
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+async function enviarEmailRed(emailDestino, redes) {
+  if (!resend) {
+    console.log("RESEND_API_KEY no configurada, se omite envío de email");
+    return;
+  }
+  if (!emailDestino || !redes || redes.length === 0) return;
+
+  try {
+    const bloques = redes.map(r => {
+      const nombres = r.red.map(p => p.nombre || p.email.split("@")[0]).join(" → ");
+      return `<p><strong>Para lo que necesitas (${r.necesita}):</strong><br/>${nombres} → tú</p>`;
+    }).join("<hr/>");
+
+    await resend.emails.send({
+      from: "Trueque de Favores <onboarding@resend.dev>",
+      to: emailDestino,
+      subject: redes.length === 1 ? "🎉 Se formó una red de trueque para ti" : `🎉 Se formaron ${redes.length} redes de trueque para ti`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+          <h2 style="color:#0f3460;">¡Tienes una red de trueque activa!</h2>
+          <p>Estas son las cadenas encontradas:</p>
+          ${bloques}
+          <p style="margin-top:20px;">Entra a la app para ver los detalles de contacto de cada persona.</p>
+          <a href="https://legendary-paletas-625914.netlify.app" style="display:inline-block;background:#0f3460;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;margin-top:10px;">Ver mi red</a>
+        </div>
+      `
+    });
+    console.log(`Email enviado a ${emailDestino}`);
+  } catch (err) {
+    console.error("Error enviando email:", err.message);
+  }
+}
+
 async function encontrarCandidatosSemanticos(necesita, candidatos) {
   if (candidatos.length === 0) return [];
   try {
@@ -195,6 +231,11 @@ app.post("/buscar-red", async (req, res) => {
 
     // Se buscan redes para TODOS los servicios activos del usuario, no solo el recién ingresado
     const redes = await buscarRedesUsuario(email);
+
+    if (redes.length > 0) {
+      enviarEmailRed(email, redes); // no se espera (fire-and-forget), no debe bloquear la respuesta
+    }
+
     res.json({ redes });
   } catch (err) {
     console.error(err);
