@@ -30,7 +30,7 @@ async function enviarEmailRed(emailDestino, redes) {
       return `<p><strong>Para lo que necesitas (${r.necesita}):</strong><br/>${nombres} → tú</p>`;
     }).join("<hr/>");
 
-    await resend.emails.send({
+    const { data, error } = await resend.emails.send({
       from: "Trueque de Favores <onboarding@resend.dev>",
       to: emailDestino,
       subject: redes.length === 1 ? "🎉 Se formó una red de trueque para ti" : `🎉 Se formaron ${redes.length} redes de trueque para ti`,
@@ -44,7 +44,12 @@ async function enviarEmailRed(emailDestino, redes) {
         </div>
       `
     });
-    console.log(`Email enviado a ${emailDestino}`);
+
+    if (error) {
+      console.error("Resend devolvio un error:", JSON.stringify(error));
+      return;
+    }
+    console.log(`Email enviado correctamente a ${emailDestino}, id: ${data?.id}`);
   } catch (err) {
     console.error("Error enviando email:", err.message);
   }
