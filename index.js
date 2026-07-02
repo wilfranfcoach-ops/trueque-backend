@@ -17,6 +17,47 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const { Resend } = require("resend");
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
+const webpush = require("web-push");
+const pushHabilitado = process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY;
+if (pushHabilitado) {
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT || "mailto:soporte@truequedefavores.com",
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+
+async function enviarPush(emailDestino, payload) {
+  if (!pushHabilitado) {
+    console.log("VAPID keys no configuradas, se omite notificacion push");
+    return;
+  }
+  try {
+    const { rows: subs } = await pool.query(
+      `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE email = $1`,
+      [emailDestino]
+    );
+    for (const sub of subs) {
+      const subscription = {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth }
+      };
+      try {
+        await webpush.sendNotification(subscription, JSON.stringify(payload));
+        console.log(`Push enviado a ${emailDestino}`);
+      } catch (err) {
+        console.error(`Error enviando push a suscripcion ${sub.id}:`, err.statusCode, err.message);
+        // 404/410 = la suscripcion ya no es valida (usuario desinstalo, expiro, etc.)
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [sub.id]);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error general enviando push:", err.message);
+  }
+}
+
 async function enviarEmailRed(emailDestino, redes) {
   if (!resend) {
     console.log("RESEND_API_KEY no configurada, se omite envío de email");
@@ -102,6 +143,14 @@ async function initDB() {
       estado TEXT DEFAULT 'activo',
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE (email, tipo, nombre)
+    );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      email TEXT REFERENCES usuarios(email),
+      endpoint TEXT UNIQUE NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
     );
   `);
   console.log("Base de datos lista");
@@ -239,6 +288,11 @@ app.post("/buscar-red", async (req, res) => {
 
     if (redes.length > 0) {
       enviarEmailRed(email, redes); // no se espera (fire-and-forget), no debe bloquear la respuesta
+      enviarPush(email, {
+        title: redes.length === 1 ? "🎉 Se formó una red de trueque" : `🎉 Se formaron ${redes.length} redes de trueque`,
+        body: "Toca para ver los detalles de contacto",
+        url: "/"
+      });
     }
 
     res.json({ redes });
@@ -340,6 +394,30 @@ app.post("/usuario", async (req, res) => {
 
 app.get("/", (req, res) => {
   res.json({ status: "Trueque Backend con Groq AI funcionando" });
+});
+
+// --- Notificaciones push reales (badge fuera de la app, como WhatsApp) ---
+
+app.get("/vapid-public-key", (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || null });
+});
+
+app.post("/push-subscribe", async (req, res) => {
+  const { email, subscription } = req.body;
+  if (!email || !subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+    return res.status(400).json({ error: "Datos de suscripcion incompletos" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (email, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (endpoint) DO UPDATE SET email = EXCLUDED.email, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+      [email, subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
 });
 
 initDB().then(() => {
