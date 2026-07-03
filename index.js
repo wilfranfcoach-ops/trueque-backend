@@ -14,6 +14,23 @@ const pool = new Pool({
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+const crypto = require("crypto");
+const PRECIO_RED_COP = 5000; // lo que paga cada persona por cada red que se le forme
+const WOMPI_PUBLIC_KEY = process.env.WOMPI_PUBLIC_KEY;
+const WOMPI_PRIVATE_KEY = process.env.WOMPI_PRIVATE_KEY;
+const WOMPI_INTEGRITY_SECRET = process.env.WOMPI_INTEGRITY_SECRET;
+const WOMPI_API_BASE = (WOMPI_PUBLIC_KEY || "").includes("test")
+  ? "https://sandbox.wompi.co/v1"
+  : "https://production.wompi.co/v1";
+const wompiHabilitado = WOMPI_PUBLIC_KEY && WOMPI_PRIVATE_KEY && WOMPI_INTEGRITY_SECRET;
+
+// Genera la "firma" que identifica una red especifica para un usuario (debe coincidir
+// exactamente con la logica del frontend, para saber si esa red en particular ya se pago)
+function firmaRedServidor(necesita, redArray) {
+  const emails = redArray.map(p => p.email).sort().join(",");
+  return `${necesita}::${emails}`;
+}
+
 const { Resend } = require("resend");
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
@@ -152,6 +169,16 @@ async function initDB() {
       auth TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS pagos_red (
+      id SERIAL PRIMARY KEY,
+      email TEXT REFERENCES usuarios(email),
+      firma TEXT NOT NULL,
+      referencia TEXT UNIQUE NOT NULL,
+      estado TEXT DEFAULT 'pendiente',
+      transaction_id TEXT,
+      monto INTEGER,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log("Base de datos lista");
 }
@@ -257,7 +284,23 @@ async function buscarRedesUsuario(email) {
     }];
     const red = await buscarRed(email, ofertas, necesidad, [email], cadenaInicial);
     if (red) {
-      resultados.push({ necesita: necesidad, red });
+      const firma = firmaRedServidor(necesidad, red);
+
+      let pagado = !wompiHabilitado; // si Wompi no esta configurado, no se bloquea nada (modo de prueba)
+      if (wompiHabilitado) {
+        const { rows: pagoRows } = await pool.query(
+          `SELECT estado FROM pagos_red WHERE email = $1 AND firma = $2 AND estado = 'pagado' LIMIT 1`,
+          [email, firma]
+        );
+        pagado = pagoRows.length > 0;
+      }
+
+      // Si no ha pagado, se bloquean los datos de contacto de todos menos del propio usuario (indice 0)
+      const redParaMostrar = pagado
+        ? red
+        : red.map((p, i) => i === 0 ? p : { ...p, telefono: "🔒", email: "🔒 Paga para ver" });
+
+      resultados.push({ necesita: necesidad, red: redParaMostrar, firma, pagado, precio: PRECIO_RED_COP });
     }
   }
   return resultados;
@@ -388,6 +431,80 @@ app.post("/usuario", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// --- Pagos con Wompi (cobro unico por cada red formada) ---
+
+app.post("/crear-pago-red", async (req, res) => {
+  if (!wompiHabilitado) {
+    return res.status(400).json({ error: "Los pagos no estan configurados todavia" });
+  }
+  const { email, firma, necesita } = req.body;
+  if (!email || !firma) {
+    return res.status(400).json({ error: "Faltan datos" });
+  }
+
+  try {
+    const referencia = `red-${crypto.randomBytes(6).toString("hex")}-${Date.now()}`;
+    const amountInCents = PRECIO_RED_COP * 100;
+    const cadena = `${referencia}${amountInCents}COP${WOMPI_INTEGRITY_SECRET}`;
+    const signature = crypto.createHash("sha256").update(cadena).digest("hex");
+
+    await pool.query(
+      `INSERT INTO pagos_red (email, firma, referencia, estado, monto) VALUES ($1, $2, $3, 'pendiente', $4)`,
+      [email, firma, referencia, PRECIO_RED_COP]
+    );
+
+    res.json({
+      reference: referencia,
+      amountInCents,
+      currency: "COP",
+      publicKey: WOMPI_PUBLIC_KEY,
+      signature
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+app.get("/confirmar-pago/:transactionId", async (req, res) => {
+  if (!wompiHabilitado) {
+    return res.status(400).json({ error: "Los pagos no estan configurados todavia" });
+  }
+  const { transactionId } = req.params;
+  try {
+    const respuesta = await fetch(`${WOMPI_API_BASE}/transactions/${transactionId}`, {
+      headers: { Authorization: `Bearer ${WOMPI_PRIVATE_KEY}` }
+    });
+    const datos = await respuesta.json();
+    const transaccion = datos.data;
+
+    if (!transaccion) {
+      return res.status(404).json({ estado: "no_encontrado" });
+    }
+
+    if (transaccion.status === "APPROVED") {
+      await pool.query(
+        `UPDATE pagos_red SET estado = 'pagado', transaction_id = $1 WHERE referencia = $2`,
+        [transactionId, transaccion.reference]
+      );
+      return res.json({ estado: "pagado" });
+    }
+
+    if (transaccion.status === "DECLINED" || transaccion.status === "ERROR" || transaccion.status === "VOIDED") {
+      await pool.query(
+        `UPDATE pagos_red SET estado = 'fallido', transaction_id = $1 WHERE referencia = $2`,
+        [transactionId, transaccion.reference]
+      );
+      return res.json({ estado: "fallido" });
+    }
+
+    res.json({ estado: "pendiente" });
+  } catch (err) {
+    console.error("Error confirmando pago:", err.message);
     res.status(500).json({ error: "Error en el servidor" });
   }
 });
