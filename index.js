@@ -5,7 +5,7 @@ const Groq = require("groq-sdk");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -23,6 +23,10 @@ const WOMPI_API_BASE = (WOMPI_PUBLIC_KEY || "").includes("test")
   ? "https://sandbox.wompi.co/v1"
   : "https://production.wompi.co/v1";
 const wompiHabilitado = WOMPI_PUBLIC_KEY && WOMPI_PRIVATE_KEY && WOMPI_INTEGRITY_SECRET;
+
+// Clave secreta simple para poder aprobar/rechazar verificaciones desde un panel manual
+// (mientras no tengas un panel de administración propio). Cambiala en Railway.
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "cambia-esta-clave";
 
 // Genera la "firma" que identifica una red especifica para un usuario (debe coincidir
 // exactamente con la logica del frontend, para saber si esa red en particular ya se pago)
@@ -150,6 +154,12 @@ async function initDB() {
       nombre TEXT,
       telefono TEXT,
       foto TEXT,
+      acepto_politica BOOLEAN DEFAULT FALSE,
+      acepto_politica_at TIMESTAMP,
+      verificacion_estado TEXT DEFAULT 'sin_verificar',
+      verificacion_imagen TEXT,
+      verificacion_actualizada_at TIMESTAMP,
+      suspendido BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS servicios (
@@ -179,25 +189,50 @@ async function initDB() {
       monto INTEGER,
       created_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS calificaciones (
+      id SERIAL PRIMARY KEY,
+      email_califica TEXT REFERENCES usuarios(email),
+      email_calificado TEXT REFERENCES usuarios(email),
+      servicio_id INTEGER,
+      estrellas INTEGER CHECK (estrellas BETWEEN 1 AND 5),
+      comentario TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS reportes (
+      id SERIAL PRIMARY KEY,
+      email_reporta TEXT REFERENCES usuarios(email),
+      email_reportado TEXT REFERENCES usuarios(email),
+      motivo TEXT,
+      estado TEXT DEFAULT 'pendiente',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS incumplimientos (
+      id SERIAL PRIMARY KEY,
+      email_reporta TEXT REFERENCES usuarios(email),
+      email_incumplido TEXT REFERENCES usuarios(email),
+      detalle TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Indices para que la busqueda de redes no tenga que recorrer toda la tabla
+    CREATE INDEX IF NOT EXISTS idx_servicios_email_tipo_estado ON servicios (email, tipo, estado);
+    CREATE INDEX IF NOT EXISTS idx_servicios_tipo_estado ON servicios (tipo, estado);
   `);
   console.log("Base de datos lista");
 }
 
 // ofertasOrigen: lista de TODOS los servicios que ofrece el usuario origen (no solo uno)
 async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados = [], cadena = [], profundidad = 0) {
-  if (profundidad > 6) return null;
+  if (profundidad > 4) return null; // se bajo de 6 a 4: cadenas mas largas rara vez son practicas y multiplican llamadas a Groq
 
   console.log(`Profundidad ${profundidad}: buscando quien ofrece "${necesitaActual}"`);
 
   // IMPORTANTE: se busca solo por lo que la gente OFRECE, sin cruzar con sus necesidades.
-  // Cruzar ofrece x necesita en la misma consulta genera combinaciones falsas cuando
-  // alguien tiene varios servicios (ej: "ofrece Lavar carro" no tiene relación real
-  // con "necesita Contabilidad" solo porque son del mismo usuario).
   const { rows: ofertantes } = await pool.query(
     `SELECT DISTINCT u.email, u.telefono, u.nombre, u.foto, s.nombre as ofrece
      FROM usuarios u
      JOIN servicios s ON u.email = s.email AND s.tipo = 'ofrece' AND s.estado = 'activo'
-     WHERE u.email != ALL($1)`,
+     WHERE u.email != ALL($1) AND u.suspendido = FALSE`,
     [[emailOrigen, ...visitados]]
   );
 
@@ -206,12 +241,22 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
   const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, ofertantes);
   console.log(`Coincidentes semanticos: ${coincidentes.length}`);
 
-  for (const candidato of coincidentes) {
-    // Se traen TODAS las necesidades activas reales de este candidato (no una sola cruzada al azar)
-    const { rows: necesidadesCandidato } = await pool.query(
-      `SELECT nombre FROM servicios WHERE email = $1 AND tipo = 'necesita' AND estado = 'activo'`,
-      [candidato.email]
+  // Se traen de una sola vez las necesidades activas de TODOS los candidatos (antes era 1 consulta por candidato)
+  const emailsCandidatos = coincidentes.map(c => c.email);
+  let necesidadesPorEmail = {};
+  if (emailsCandidatos.length > 0) {
+    const { rows: todasNecesidades } = await pool.query(
+      `SELECT email, nombre FROM servicios WHERE email = ANY($1) AND tipo = 'necesita' AND estado = 'activo'`,
+      [emailsCandidatos]
     );
+    necesidadesPorEmail = todasNecesidades.reduce((acc, row) => {
+      (acc[row.email] = acc[row.email] || []).push({ nombre: row.nombre });
+      return acc;
+    }, {});
+  }
+
+  for (const candidato of coincidentes) {
+    const necesidadesCandidato = necesidadesPorEmail[candidato.email] || [];
     if (necesidadesCandidato.length === 0) continue; // no tiene necesidades activas, no puede continuar la cadena
 
     const nuevaEntrada = {
@@ -224,18 +269,18 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    // 1) Antes de profundizar, se revisa si CUALQUIERA de las necesidades de este
-    // candidato cierra directo con CUALQUIERA de los servicios que ofrece el origen.
-    for (const nec of necesidadesCandidato) {
-      const cierre = await encontrarCandidatosSemanticos(
-        nec.nombre,
-        ofertasOrigen.map(o => ({ ofrece: o }))
-      );
-      if (cierre.length > 0) {
-        console.log(`RED CERRADA con ${candidato.email} (origen ofrece: ${cierre[0].ofrece})`);
-        nuevaCadena[0] = { ...nuevaCadena[0], servicio: cierre[0].ofrece };
-        return nuevaCadena;
-      }
+    // 1) Antes de profundizar, se revisan EN PARALELO todas las necesidades de este
+    // candidato contra lo que ofrece el origen, en vez de una llamada a Groq por cada una.
+    const cierres = await Promise.all(
+      necesidadesCandidato.map(nec =>
+        encontrarCandidatosSemanticos(nec.nombre, ofertasOrigen.map(o => ({ ofrece: o })))
+      )
+    );
+    const indiceCierre = cierres.findIndex(c => c.length > 0);
+    if (indiceCierre !== -1) {
+      console.log(`RED CERRADA con ${candidato.email} (origen ofrece: ${cierres[indiceCierre][0].ofrece})`);
+      nuevaCadena[0] = { ...nuevaCadena[0], servicio: cierres[indiceCierre][0].ofrece };
+      return nuevaCadena;
     }
 
     // 2) Si no cerró directo, se intenta profundizar usando cada una de sus necesidades
@@ -273,35 +318,39 @@ async function buscarRedesUsuario(email) {
   );
   const datosUsuario = usuarioRows[0] || {};
 
+  // Se buscan todas las necesidades EN PARALELO en vez de una por una (antes era secuencial con await en un for)
+  const busquedas = await Promise.all(
+    necesidades.map(necesidad => {
+      const cadenaInicial = [{
+        email,
+        servicio: "",
+        telefono: datosUsuario.telefono || "",
+        nombre: datosUsuario.nombre || "",
+        foto: datosUsuario.foto || ""
+      }];
+      return buscarRed(email, ofertas, necesidad, [email], cadenaInicial).then(red => ({ necesidad, red }));
+    })
+  );
+
   const resultados = [];
-  for (const necesidad of necesidades) {
-    const cadenaInicial = [{
-      email,
-      servicio: "",
-      telefono: datosUsuario.telefono || "",
-      nombre: datosUsuario.nombre || "",
-      foto: datosUsuario.foto || ""
-    }];
-    const red = await buscarRed(email, ofertas, necesidad, [email], cadenaInicial);
-    if (red) {
-      const firma = firmaRedServidor(necesidad, red);
+  for (const { necesidad, red } of busquedas) {
+    if (!red) continue;
+    const firma = firmaRedServidor(necesidad, red);
 
-      let pagado = !wompiHabilitado; // si Wompi no esta configurado, no se bloquea nada (modo de prueba)
-      if (wompiHabilitado) {
-        const { rows: pagoRows } = await pool.query(
-          `SELECT estado FROM pagos_red WHERE email = $1 AND firma = $2 AND estado = 'pagado' LIMIT 1`,
-          [email, firma]
-        );
-        pagado = pagoRows.length > 0;
-      }
-
-      // Si no ha pagado, se bloquean los datos de contacto de todos menos del propio usuario (indice 0)
-      const redParaMostrar = pagado
-        ? red
-        : red.map((p, i) => i === 0 ? p : { ...p, telefono: "🔒", email: "🔒 Paga para ver" });
-
-      resultados.push({ necesita: necesidad, red: redParaMostrar, firma, pagado, precio: PRECIO_RED_COP });
+    let pagado = !wompiHabilitado; // si Wompi no esta configurado, no se bloquea nada (modo de prueba)
+    if (wompiHabilitado) {
+      const { rows: pagoRows } = await pool.query(
+        `SELECT estado FROM pagos_red WHERE email = $1 AND firma = $2 AND estado = 'pagado' LIMIT 1`,
+        [email, firma]
+      );
+      pagado = pagoRows.length > 0;
     }
+
+    const redParaMostrar = pagado
+      ? red
+      : red.map((p, i) => i === 0 ? p : { ...p, telefono: "🔒", email: "🔒 Paga para ver" });
+
+    resultados.push({ necesita: necesidad, red: redParaMostrar, firma, pagado, precio: PRECIO_RED_COP });
   }
   return resultados;
 }
@@ -404,7 +453,7 @@ app.get("/usuario/:email", async (req, res) => {
   const { email } = req.params;
   try {
     const { rows } = await pool.query(
-      `SELECT email, nombre, telefono, foto FROM usuarios WHERE email = $1`,
+      `SELECT email, nombre, telefono, foto, acepto_politica, verificacion_estado, suspendido FROM usuarios WHERE email = $1`,
       [email]
     );
     res.json({ usuario: rows[0] || null });
@@ -427,6 +476,154 @@ app.post("/usuario", async (req, res) => {
          foto = COALESCE(EXCLUDED.foto, usuarios.foto),
          nombre = COALESCE(EXCLUDED.nombre, usuarios.nombre)`,
       [email, telefono || null, foto || null, nombre || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// --- Política de Uso y Convivencia ---
+
+app.post("/aceptar-politica", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Falta email" });
+  try {
+    await pool.query(
+      `INSERT INTO usuarios (email, acepto_politica, acepto_politica_at) VALUES ($1, TRUE, NOW())
+       ON CONFLICT (email) DO UPDATE SET acepto_politica = TRUE, acepto_politica_at = NOW()`,
+      [email]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// --- Verificación de identidad (foto de cédula o selfie) ---
+// Nota: guardar la imagen como base64 en la base de datos es funcional para un piloto,
+// pero no escala bien. Cuando crezcas, conviene moverlo a un bucket (ej. Cloudflare R2, S3).
+
+app.post("/verificacion", async (req, res) => {
+  const { email, imagen } = req.body;
+  if (!email || !imagen) return res.status(400).json({ error: "Faltan datos" });
+  try {
+    await pool.query(
+      `INSERT INTO usuarios (email, verificacion_estado, verificacion_imagen, verificacion_actualizada_at)
+       VALUES ($1, 'pendiente', $2, NOW())
+       ON CONFLICT (email) DO UPDATE SET verificacion_estado = 'pendiente', verificacion_imagen = $2, verificacion_actualizada_at = NOW()`,
+      [email, imagen]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// Panel manual muy simple para aprobar/rechazar verificaciones pendientes.
+// Entra a https://TU-BACKEND/admin/verificaciones?clave=TU_ADMIN_SECRET desde el navegador.
+app.get("/admin/verificaciones", async (req, res) => {
+  if (req.query.clave !== ADMIN_SECRET) return res.status(403).send("No autorizado");
+  const { rows } = await pool.query(
+    `SELECT email, verificacion_imagen, verificacion_actualizada_at FROM usuarios WHERE verificacion_estado = 'pendiente' ORDER BY verificacion_actualizada_at ASC`
+  );
+  const html = rows.map(r => `
+    <div style="border:1px solid #ccc;padding:12px;margin-bottom:12px;max-width:400px;">
+      <p><strong>${r.email}</strong></p>
+      <img src="${r.verificacion_imagen}" style="max-width:300px;display:block;margin-bottom:8px;" />
+      <a href="/admin/verificar?clave=${ADMIN_SECRET}&email=${encodeURIComponent(r.email)}&estado=aprobada">✅ Aprobar</a>
+      &nbsp;|&nbsp;
+      <a href="/admin/verificar?clave=${ADMIN_SECRET}&email=${encodeURIComponent(r.email)}&estado=rechazada">❌ Rechazar</a>
+    </div>
+  `).join("") || "<p>No hay verificaciones pendientes.</p>";
+  res.send(`<html><body>${html}</body></html>`);
+});
+
+app.get("/admin/verificar", async (req, res) => {
+  if (req.query.clave !== ADMIN_SECRET) return res.status(403).send("No autorizado");
+  const { email, estado } = req.query;
+  if (!email || !["aprobada", "rechazada"].includes(estado)) return res.status(400).send("Datos invalidos");
+  await pool.query(`UPDATE usuarios SET verificacion_estado = $1 WHERE email = $2`, [estado, email]);
+  res.redirect(`/admin/verificaciones?clave=${ADMIN_SECRET}`);
+});
+
+// --- Calificaciones (reputación) ---
+
+app.post("/calificar", async (req, res) => {
+  const { emailCalifica, emailCalificado, servicioId, estrellas, comentario } = req.body;
+  if (!emailCalifica || !emailCalificado || !estrellas) {
+    return res.status(400).json({ error: "Faltan datos" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO calificaciones (email_califica, email_calificado, servicio_id, estrellas, comentario)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [emailCalifica, emailCalificado, servicioId || null, estrellas, comentario || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+app.get("/reputacion/:email", async (req, res) => {
+  const { email } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int as total, AVG(estrellas)::float as promedio
+       FROM calificaciones WHERE email_calificado = $1`,
+      [email]
+    );
+    res.json({ total: rows[0].total, promedio: rows[0].promedio });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// --- Reportes y suspensión automática ---
+
+const REPORTES_PARA_SUSPENDER = 3;
+
+app.post("/reportar", async (req, res) => {
+  const { emailReporta, emailReportado, motivo } = req.body;
+  if (!emailReporta || !emailReportado || !motivo) {
+    return res.status(400).json({ error: "Faltan datos" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO reportes (email_reporta, email_reportado, motivo) VALUES ($1, $2, $3)`,
+      [emailReporta, emailReportado, motivo]
+    );
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int as total FROM reportes WHERE email_reportado = $1`,
+      [emailReportado]
+    );
+    if (rows[0].total >= REPORTES_PARA_SUSPENDER) {
+      await pool.query(`UPDATE usuarios SET suspendido = TRUE WHERE email = $1`, [emailReportado]);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error en el servidor" });
+  }
+});
+
+// --- Incumplimientos (no-show) ---
+
+app.post("/incumplimiento", async (req, res) => {
+  const { emailReporta, emailIncumplido, detalle } = req.body;
+  if (!emailReporta || !emailIncumplido) {
+    return res.status(400).json({ error: "Faltan datos" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO incumplimientos (email_reporta, email_incumplido, detalle) VALUES ($1, $2, $3)`,
+      [emailReporta, emailIncumplido, detalle || null]
     );
     res.json({ ok: true });
   } catch (err) {
