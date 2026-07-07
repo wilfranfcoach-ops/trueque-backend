@@ -154,14 +154,31 @@ async function initDB() {
       nombre TEXT,
       telefono TEXT,
       foto TEXT,
-      acepto_politica BOOLEAN DEFAULT FALSE,
-      acepto_politica_at TIMESTAMP,
-      verificacion_estado TEXT DEFAULT 'sin_verificar',
-      verificacion_imagen TEXT,
-      verificacion_actualizada_at TIMESTAMP,
-      suspendido BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT NOW()
     );
+  `);
+
+  // IMPORTANTE: como la tabla "usuarios" ya existia de antes, "CREATE TABLE IF NOT EXISTS"
+  // no le agrega columnas nuevas (Postgres simplemente ignora el bloque si la tabla ya existe).
+  // Por eso las columnas nuevas se agregan aqui de forma explicita con ALTER TABLE.
+  await pool.query(`
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acepto_politica BOOLEAN DEFAULT FALSE;
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acepto_politica_at TIMESTAMP;
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacion_estado TEXT DEFAULT 'sin_verificar';
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacion_imagen TEXT;
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacion_actualizada_at TIMESTAMP;
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspendido BOOLEAN DEFAULT FALSE;
+  `);
+
+  // Por si acaso algun usuario viejo quedo con estos campos en NULL en vez del default
+  // (puede pasar con filas creadas antes de que la columna existiera).
+  await pool.query(`
+    UPDATE usuarios SET suspendido = FALSE WHERE suspendido IS NULL;
+    UPDATE usuarios SET verificacion_estado = 'sin_verificar' WHERE verificacion_estado IS NULL;
+    UPDATE usuarios SET acepto_politica = FALSE WHERE acepto_politica IS NULL;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS servicios (
       id SERIAL PRIMARY KEY,
       email TEXT REFERENCES usuarios(email),
