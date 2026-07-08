@@ -68,7 +68,6 @@ async function enviarPush(emailDestino, payload) {
         console.log(`Push enviado a ${emailDestino}`);
       } catch (err) {
         console.error(`Error enviando push a suscripcion ${sub.id}:`, err.statusCode, err.message);
-        // 404/410 = la suscripcion ya no es valida (usuario desinstalo, expiro, etc.)
         if (err.statusCode === 404 || err.statusCode === 410) {
           await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [sub.id]);
         }
@@ -158,9 +157,6 @@ async function initDB() {
     );
   `);
 
-  // IMPORTANTE: como la tabla "usuarios" ya existia de antes, "CREATE TABLE IF NOT EXISTS"
-  // no le agrega columnas nuevas (Postgres simplemente ignora el bloque si la tabla ya existe).
-  // Por eso las columnas nuevas se agregan aqui de forma explicita con ALTER TABLE.
   await pool.query(`
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acepto_politica BOOLEAN DEFAULT FALSE;
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS acepto_politica_at TIMESTAMP;
@@ -170,8 +166,6 @@ async function initDB() {
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspendido BOOLEAN DEFAULT FALSE;
   `);
 
-  // Por si acaso algun usuario viejo quedo con estos campos en NULL en vez del default
-  // (puede pasar con filas creadas antes de que la columna existiera).
   await pool.query(`
     UPDATE usuarios SET suspendido = FALSE WHERE suspendido IS NULL;
     UPDATE usuarios SET verificacion_estado = 'sin_verificar' WHERE verificacion_estado IS NULL;
@@ -188,6 +182,16 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE (email, tipo, nombre)
     );
+  `);
+
+  // Columna para saber cuando fue el ultimo "movimiento" real de un servicio
+  // (se creo, se reactivo, o cambio de estado) - la usa la limpieza automatica de 30 dias.
+  await pool.query(`
+    ALTER TABLE servicios ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+    UPDATE servicios SET updated_at = created_at WHERE updated_at IS NULL;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       id SERIAL PRIMARY KEY,
       email TEXT REFERENCES usuarios(email),
@@ -231,20 +235,36 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     );
 
-    -- Indices para que la busqueda de redes no tenga que recorrer toda la tabla
     CREATE INDEX IF NOT EXISTS idx_servicios_email_tipo_estado ON servicios (email, tipo, estado);
     CREATE INDEX IF NOT EXISTS idx_servicios_tipo_estado ON servicios (tipo, estado);
   `);
   console.log("Base de datos lista");
 }
 
-// ofertasOrigen: lista de TODOS los servicios que ofrece el usuario origen (no solo uno)
+// --- Limpieza automatica (corre 1 vez al iniciar y luego cada 24h) ---
+const DIAS_INACTIVIDAD = 30;
+const DIAS_GRACIA_EJECUTADO = 3; // se deja el registro unos dias para calificaciones/reportes antes de borrarlo
+
+async function limpiarServiciosViejos() {
+  try {
+    const ejecutados = await pool.query(
+      `DELETE FROM servicios WHERE estado = 'ejecutado' AND updated_at < NOW() - INTERVAL '${DIAS_GRACIA_EJECUTADO} days'`
+    );
+    const inactivos = await pool.query(
+      `UPDATE servicios SET estado = 'inactivo', updated_at = NOW()
+       WHERE estado = 'activo' AND updated_at < NOW() - INTERVAL '${DIAS_INACTIVIDAD} days'`
+    );
+    console.log(`Limpieza automatica: ${ejecutados.rowCount} servicios ejecutados eliminados, ${inactivos.rowCount} servicios inactivados por 30+ dias sin movimiento`);
+  } catch (err) {
+    console.error("Error en limpieza automatica:", err.message);
+  }
+}
+
 async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados = [], cadena = [], profundidad = 0) {
-  if (profundidad > 4) return null; // se bajo de 6 a 4: cadenas mas largas rara vez son practicas y multiplican llamadas a Groq
+  if (profundidad > 4) return null;
 
   console.log(`Profundidad ${profundidad}: buscando quien ofrece "${necesitaActual}"`);
 
-  // IMPORTANTE: se busca solo por lo que la gente OFRECE, sin cruzar con sus necesidades.
   const { rows: ofertantes } = await pool.query(
     `SELECT DISTINCT u.email, u.telefono, u.nombre, u.foto, s.nombre as ofrece
      FROM usuarios u
@@ -258,7 +278,6 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
   const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, ofertantes);
   console.log(`Coincidentes semanticos: ${coincidentes.length}`);
 
-  // Se traen de una sola vez las necesidades activas de TODOS los candidatos (antes era 1 consulta por candidato)
   const emailsCandidatos = coincidentes.map(c => c.email);
   let necesidadesPorEmail = {};
   if (emailsCandidatos.length > 0) {
@@ -274,7 +293,7 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
 
   for (const candidato of coincidentes) {
     const necesidadesCandidato = necesidadesPorEmail[candidato.email] || [];
-    if (necesidadesCandidato.length === 0) continue; // no tiene necesidades activas, no puede continuar la cadena
+    if (necesidadesCandidato.length === 0) continue;
 
     const nuevaEntrada = {
       email: candidato.email,
@@ -286,8 +305,6 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
     const nuevosVisitados = [...visitados, candidato.email];
     const nuevaCadena = [...cadena, nuevaEntrada];
 
-    // 1) Antes de profundizar, se revisan EN PARALELO todas las necesidades de este
-    // candidato contra lo que ofrece el origen, en vez de una llamada a Groq por cada una.
     const cierres = await Promise.all(
       necesidadesCandidato.map(nec =>
         encontrarCandidatosSemanticos(nec.nombre, ofertasOrigen.map(o => ({ ofrece: o })))
@@ -300,7 +317,6 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
       return nuevaCadena;
     }
 
-    // 2) Si no cerró directo, se intenta profundizar usando cada una de sus necesidades
     for (const nec of necesidadesCandidato) {
       const redProfunda = await buscarRed(
         emailOrigen,
@@ -316,7 +332,6 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
   return null;
 }
 
-// Busca redes para TODOS los servicios activos ("necesita") del usuario, no solo el último ingresado
 async function buscarRedesUsuario(email) {
   const { rows: serviciosActivos } = await pool.query(
     `SELECT tipo, nombre FROM servicios WHERE email = $1 AND estado = 'activo'`,
@@ -335,7 +350,6 @@ async function buscarRedesUsuario(email) {
   );
   const datosUsuario = usuarioRows[0] || {};
 
-  // Se buscan todas las necesidades EN PARALELO en vez de una por una (antes era secuencial con await en un for)
   const busquedas = await Promise.all(
     necesidades.map(necesidad => {
       const cadenaInicial = [{
@@ -351,10 +365,16 @@ async function buscarRedesUsuario(email) {
 
   const resultados = [];
   for (const { necesidad, red } of busquedas) {
-    if (!red) continue;
-    const firma = firmaRedServidor(necesidad, red);
+    if (!red || red.length < 2) continue; // una red valida siempre tiene al menos origen + 1 eslabon
 
-    let pagado = !wompiHabilitado; // si Wompi no esta configurado, no se bloquea nada (modo de prueba)
+    // El "siguiente eslabon" es la unica persona a la que este usuario le presta su servicio.
+    // Solo el contacto de ESA persona se bloquea/desbloquea con el pago de este usuario -
+    // el resto de la cadena se muestra (foto+nombre) para dar contexto, pero nunca se desbloquea
+    // desde esta cuenta (cada quien paga por su propio eslabon cuando entra a la suya).
+    const siguiente = red[1];
+    const firma = `${necesidad}::${email}->${siguiente.email}`;
+
+    let pagado = !wompiHabilitado;
     if (wompiHabilitado) {
       const { rows: pagoRows } = await pool.query(
         `SELECT estado FROM pagos_red WHERE email = $1 AND firma = $2 AND estado = 'pagado' LIMIT 1`,
@@ -363,9 +383,11 @@ async function buscarRedesUsuario(email) {
       pagado = pagoRows.length > 0;
     }
 
-    const redParaMostrar = pagado
-      ? red
-      : red.map((p, i) => i === 0 ? p : { ...p, telefono: "🔒", email: "🔒 Paga para ver" });
+    const redParaMostrar = red.map((p, i) => {
+      if (i === 0) return p; // el propio usuario
+      if (i === 1) return pagado ? p : { ...p, telefono: "🔒", email: "🔒 Paga para ver" };
+      return { ...p, telefono: "🔒", email: "🔒" }; // nunca se desbloquea desde esta cuenta
+    });
 
     resultados.push({ necesita: necesidad, red: redParaMostrar, firma, pagado, precio: PRECIO_RED_COP });
   }
@@ -385,18 +407,16 @@ app.post("/buscar-red", async (req, res) => {
       [email, telefono || null, foto || null, nombre || null]
     );
 
-    // Se agrega el nuevo par sin borrar los servicios anteriores del usuario
     await pool.query(
       `INSERT INTO servicios (email, tipo, nombre, estado) VALUES ($1, 'ofrece', $2, 'activo'), ($1, 'necesita', $3, 'activo')
-       ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo'`,
+       ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo', updated_at = NOW()`,
       [email, ofrece, necesita]
     );
 
-    // Se buscan redes para TODOS los servicios activos del usuario, no solo el recién ingresado
     const redes = await buscarRedesUsuario(email);
 
     if (redes.length > 0) {
-      enviarEmailRed(email, redes); // no se espera (fire-and-forget), no debe bloquear la respuesta
+      enviarEmailRed(email, redes);
       enviarPush(email, {
         title: redes.length === 1 ? "🎉 Se formó una red de trueque" : `🎉 Se formaron ${redes.length} redes de trueque`,
         body: "Toca para ver los detalles de contacto",
@@ -411,7 +431,6 @@ app.post("/buscar-red", async (req, res) => {
   }
 });
 
-// Consultar las redes disponibles del usuario sin necesidad de agregar un servicio nuevo
 app.get("/mis-redes/:email", async (req, res) => {
   const { email } = req.params;
   try {
@@ -445,7 +464,7 @@ app.patch("/servicio/:id/estado", async (req, res) => {
   const { id } = req.params;
   const { estado } = req.body;
   try {
-    await pool.query(`UPDATE servicios SET estado = $1 WHERE id = $2`, [estado, id]);
+    await pool.query(`UPDATE servicios SET estado = $1, updated_at = NOW() WHERE id = $2`, [estado, id]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -463,8 +482,6 @@ app.delete("/servicio/:id", async (req, res) => {
     res.status(500).json({ error: "Error en el servidor" });
   }
 });
-
-// --- Opción B: teléfono manejado por nuestra propia app, sin depender de Clerk ---
 
 app.get("/usuario/:email", async (req, res) => {
   const { email } = req.params;
@@ -501,8 +518,6 @@ app.post("/usuario", async (req, res) => {
   }
 });
 
-// --- Política de Uso y Convivencia ---
-
 app.post("/aceptar-politica", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Falta email" });
@@ -518,10 +533,6 @@ app.post("/aceptar-politica", async (req, res) => {
     res.status(500).json({ error: "Error en el servidor" });
   }
 });
-
-// --- Verificación de identidad (foto de cédula o selfie) ---
-// Nota: guardar la imagen como base64 en la base de datos es funcional para un piloto,
-// pero no escala bien. Cuando crezcas, conviene moverlo a un bucket (ej. Cloudflare R2, S3).
 
 app.post("/verificacion", async (req, res) => {
   const { email, imagen } = req.body;
@@ -540,8 +551,6 @@ app.post("/verificacion", async (req, res) => {
   }
 });
 
-// Panel manual muy simple para aprobar/rechazar verificaciones pendientes.
-// Entra a https://TU-BACKEND/admin/verificaciones?clave=TU_ADMIN_SECRET desde el navegador.
 app.get("/admin/verificaciones", async (req, res) => {
   if (req.query.clave !== ADMIN_SECRET) return res.status(403).send("No autorizado");
   const { rows } = await pool.query(
@@ -566,8 +575,6 @@ app.get("/admin/verificar", async (req, res) => {
   await pool.query(`UPDATE usuarios SET verificacion_estado = $1 WHERE email = $2`, [estado, email]);
   res.redirect(`/admin/verificaciones?clave=${ADMIN_SECRET}`);
 });
-
-// --- Calificaciones (reputación) ---
 
 app.post("/calificar", async (req, res) => {
   const { emailCalifica, emailCalificado, servicioId, estrellas, comentario } = req.body;
@@ -602,8 +609,6 @@ app.get("/reputacion/:email", async (req, res) => {
   }
 });
 
-// --- Reportes y suspensión automática ---
-
 const REPORTES_PARA_SUSPENDER = 3;
 
 app.post("/reportar", async (req, res) => {
@@ -630,8 +635,6 @@ app.post("/reportar", async (req, res) => {
   }
 });
 
-// --- Incumplimientos (no-show) ---
-
 app.post("/incumplimiento", async (req, res) => {
   const { emailReporta, emailIncumplido, detalle } = req.body;
   if (!emailReporta || !emailIncumplido) {
@@ -648,8 +651,6 @@ app.post("/incumplimiento", async (req, res) => {
     res.status(500).json({ error: "Error en el servidor" });
   }
 });
-
-// --- Pagos con Wompi (cobro unico por cada red formada) ---
 
 app.post("/crear-pago-red", async (req, res) => {
   if (!wompiHabilitado) {
@@ -727,8 +728,6 @@ app.get("/", (req, res) => {
   res.json({ status: "Trueque Backend con Groq AI funcionando" });
 });
 
-// --- Notificaciones push reales (badge fuera de la app, como WhatsApp) ---
-
 app.get("/vapid-public-key", (req, res) => {
   res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || null });
 });
@@ -754,4 +753,7 @@ app.post("/push-subscribe", async (req, res) => {
 initDB().then(() => {
   const PORT = process.env.PORT || 4000;
   app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`));
+
+  limpiarServiciosViejos(); // corre una vez al iniciar
+  setInterval(limpiarServiciosViejos, 24 * 60 * 60 * 1000); // y luego cada 24 horas
 });
