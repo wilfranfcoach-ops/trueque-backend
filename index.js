@@ -101,7 +101,7 @@ async function enviarEmailRed(emailDestino, redes) {
           <p>Estas son las cadenas encontradas:</p>
           ${bloques}
           <p style="margin-top:20px;">Entra a la app para ver los detalles de contacto de cada persona.</p>
-          <a href="https://legendary-paletas-625914.netlify.app" style="display:inline-block;background:#0f3460;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;margin-top:10px;">Ver mi red</a>
+          <a href="https://trueque-favores.vercel.app" style="display:inline-block;background:#0f3460;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;margin-top:10px;">Ver mi red</a>
         </div>
       `
     });
