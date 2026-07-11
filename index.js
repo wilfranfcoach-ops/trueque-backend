@@ -269,11 +269,13 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
     `SELECT DISTINCT u.email, u.telefono, u.nombre, u.foto, s.nombre as ofrece
      FROM usuarios u
      JOIN servicios s ON u.email = s.email AND s.tipo = 'ofrece' AND s.estado = 'activo'
-     WHERE u.email != ALL($1) AND u.suspendido = FALSE`,
+     WHERE u.email != ALL($1) AND u.suspendido = FALSE
+     ORDER BY u.email`,
     [[emailOrigen, ...visitados]]
   );
 
   console.log(`Ofertantes encontrados: ${ofertantes.length}`);
+  ofertantes.forEach((o, i) => console.log(`  [${i}] ${o.email} ofrece: "${o.ofrece}"`));
 
   const coincidentes = await encontrarCandidatosSemanticos(necesitaActual, ofertantes);
   console.log(`Coincidentes semanticos: ${coincidentes.length}`);
