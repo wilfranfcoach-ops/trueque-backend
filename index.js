@@ -122,11 +122,20 @@ async function encontrarCandidatosSemanticos(necesita, candidatos) {
     const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
+      temperature: 0, // sin esto el modelo "improvisa" (aleatorio) en vez de clasificar de forma consistente
       messages: [{
         role: "user",
-        content: `Tengo un usuario que necesita: "${necesita}"
-¿Cuáles de estos servicios son equivalentes o muy similares a lo que necesita?
+        content: `Un usuario necesita: "${necesita}"
+
+Evalúa cada uno de estos servicios y decide si la persona que lo ofrece podría RESOLVER exactamente esa necesidad:
 ${lista}
+
+Reglas estrictas:
+- Marca un servicio SOLO si es el mismo servicio, o un sinónimo/variación directa (ej: "pintar casas" y "pintura de fachadas" SÍ son equivalentes).
+- NO marques servicios de una categoría relacionada pero distinta (ej: "vender pintura" NO es lo mismo que "pintar paredes"; "maquillaje" NO es "pintura de casas"; "clases de yoga" NO resuelve una necesidad de pintura).
+- NO marques un servicio solo porque comparte una palabra con la necesidad.
+- Si tienes duda razonable, NO lo incluyas. Prefiere ser estricto a ser permisivo.
+
 Responde SOLO con los números separados por comas, ejemplo: 0,2,3
 Si ninguno coincide responde: ninguno`
       }],
