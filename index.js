@@ -119,10 +119,10 @@ async function enviarEmailRed(emailDestino, redes) {
 async function encontrarCandidatosSemanticos(necesita, candidatos) {
   if (candidatos.length === 0) return [];
   try {
-    const lista = candidatos.map((c, i) => `${i}: "${c.ofrece}"`).join("\n");
+    const lista = candidatos.map(c => `- "${c.ofrece}"`).join("\n");
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
-      temperature: 0, // sin esto el modelo "improvisa" (aleatorio) en vez de clasificar de forma consistente
+      temperature: 0,
       messages: [{
         role: "user",
         content: `Un usuario necesita: "${necesita}"
@@ -136,16 +136,20 @@ Reglas estrictas:
 - NO marques un servicio solo porque comparte una palabra con la necesidad.
 - Si tienes duda razonable, NO lo incluyas. Prefiere ser estricto a ser permisivo.
 
-Responde SOLO con los números separados por comas, ejemplo: 0,2,3
-Si ninguno coincide responde: ninguno`
+Responde copiando EXACTAMENTE el texto entre comillas de cada servicio que coincida, uno por línea, tal cual está escrito arriba (sin números, sin explicaciones).
+Si ninguno coincide, responde solo: ninguno`
       }],
-      max_tokens: 50
+      max_tokens: 150
     });
     const texto = completion.choices[0].message.content.trim();
-    console.log(`Groq respuesta para "${necesita}": ${texto}`);
+    console.log(`Groq respuesta para "${necesita}": ${texto.replace(/\n/g, " | ")}`);
     if (texto.toLowerCase().includes("ninguno")) return [];
-    const indices = texto.split(",").map(n => parseInt(n.trim())).filter(n => !isNaN(n));
-    return indices.map(i => candidatos[i]).filter(Boolean);
+
+    // Se compara el texto devuelto contra la lista REAL de candidatos (comparacion exacta,
+    // sin distinguir mayusculas/minusculas ni comillas sueltas). Esto elimina por completo
+    // el riesgo de que el modelo "cuente mal" un indice numerico y apunte al servicio equivocado.
+    const lineas = texto.split("\n").map(l => l.replace(/["\-•\s]+$/g, "").replace(/^["\-•\s]+/g, "").trim().toLowerCase()).filter(Boolean);
+    return candidatos.filter(c => lineas.includes(c.ofrece.trim().toLowerCase()));
   } catch (err) {
     console.error("Error Groq:", err.message);
     return candidatos.filter(c =>
