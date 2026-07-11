@@ -559,6 +559,20 @@ app.post("/verificacion", async (req, res) => {
        ON CONFLICT (email) DO UPDATE SET verificacion_estado = 'pendiente', verificacion_imagen = $2, verificacion_actualizada_at = NOW()`,
       [email, imagen]
     );
+
+    // Avisar al admin (tú) por email que hay una verificacion nueva por revisar
+    if (resend && process.env.ADMIN_EMAIL) {
+      resend.emails.send({
+        from: "Trueque de Favores <onboarding@resend.dev>",
+        to: process.env.ADMIN_EMAIL,
+        subject: "🪪 Nueva verificación de identidad pendiente",
+        html: `
+          <p>El usuario <strong>${email}</strong> subió una foto para verificar su identidad.</p>
+          <a href="https://trueque-favores-production.up.railway.app/admin/verificaciones?clave=${ADMIN_SECRET}" style="display:inline-block;background:#0f3460;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;margin-top:10px;">Revisar ahora</a>
+        `
+      }).catch(err => console.error("Error avisando al admin:", err.message));
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
