@@ -92,7 +92,7 @@ async function enviarEmailRed(emailDestino, redes) {
     }).join("<hr/>");
 
     const { data, error } = await resend.emails.send({
-      from: "Trueque de Favores <onboarding@resend.dev>",
+      from: "Trueque de Favores <notificaciones@truequedefavores.com>",
       to: emailDestino,
       subject: redes.length === 1 ? "🎉 Se formó una red de trueque para ti" : `🎉 Se formaron ${redes.length} redes de trueque para ti`,
       html: `
@@ -563,7 +563,7 @@ app.post("/verificacion", async (req, res) => {
     // Avisar al admin (tú) por email que hay una verificacion nueva por revisar
     if (resend && process.env.ADMIN_EMAIL) {
       resend.emails.send({
-        from: "Trueque de Favores <onboarding@resend.dev>",
+        from: "Trueque de Favores <notificaciones@truequedefavores.com>",
         to: process.env.ADMIN_EMAIL,
         subject: "🪪 Nueva verificación de identidad pendiente",
         html: `
