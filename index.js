@@ -177,6 +177,7 @@ async function initDB() {
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacion_imagen TEXT;
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS verificacion_actualizada_at TIMESTAMP;
     ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspendido BOOLEAN DEFAULT FALSE;
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ciudad TEXT;
   `);
 
   await pool.query(`
@@ -202,6 +203,7 @@ async function initDB() {
   await pool.query(`
     ALTER TABLE servicios ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
     UPDATE servicios SET updated_at = created_at WHERE updated_at IS NULL;
+    ALTER TABLE servicios ADD COLUMN IF NOT EXISTS remoto BOOLEAN DEFAULT FALSE;
   `);
 
   await pool.query(`
@@ -273,7 +275,7 @@ async function limpiarServiciosViejos() {
   }
 }
 
-async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados = [], cadena = [], profundidad = 0) {
+async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, ciudadOrigen, visitados = [], cadena = [], profundidad = 0) {
   if (profundidad > 4) return null;
 
   console.log(`Profundidad ${profundidad}: buscando quien ofrece "${necesitaActual}"`);
@@ -283,8 +285,9 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
      FROM usuarios u
      JOIN servicios s ON u.email = s.email AND s.tipo = 'ofrece' AND s.estado = 'activo'
      WHERE u.email != ALL($1) AND u.suspendido = FALSE
+     AND (s.remoto = TRUE OR u.ciudad = $2)
      ORDER BY u.email`,
-    [[emailOrigen, ...visitados]]
+    [[emailOrigen, ...visitados], ciudadOrigen]
   );
 
   console.log(`Ofertantes encontrados: ${ofertantes.length}`);
@@ -337,6 +340,7 @@ async function buscarRed(emailOrigen, ofertasOrigen, necesitaActual, visitados =
         emailOrigen,
         ofertasOrigen,
         nec.nombre,
+        ciudadOrigen,
         nuevosVisitados,
         nuevaCadena,
         profundidad + 1
@@ -359,8 +363,8 @@ async function buscarRedesUsuario(email) {
     return [];
   }
 
-  const { rows: usuarioRows } = await pool.query(
-    `SELECT telefono, nombre, foto FROM usuarios WHERE email = $1`,
+ const { rows: usuarioRows } = await pool.query(
+    `SELECT telefono, nombre, foto, ciudad FROM usuarios WHERE email = $1`,
     [email]
   );
   const datosUsuario = usuarioRows[0] || {};
@@ -374,7 +378,7 @@ async function buscarRedesUsuario(email) {
         nombre: datosUsuario.nombre || "",
         foto: datosUsuario.foto || ""
       }];
-      return buscarRed(email, ofertas, necesidad, [email], cadenaInicial).then(red => ({ necesidad, red }));
+     return buscarRed(email, ofertas, necesidad, datosUsuario.ciudad, [email], cadenaInicial).then(red => ({ necesidad, red }));
     })
   );
 
@@ -410,24 +414,23 @@ async function buscarRedesUsuario(email) {
 }
 
 app.post("/buscar-red", async (req, res) => {
-  const { email, ofrece, necesita, telefono, foto, nombre } = req.body;
+  const { email, ofrece, necesita, telefono, foto, nombre, ciudad, ofreceRemoto } = req.body;
   if (!email || !ofrece || !necesita) {
     return res.status(400).json({ error: "Faltan datos" });
   }
 
   try {
     await pool.query(
-      `INSERT INTO usuarios (email, telefono, foto, nombre) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono, foto = EXCLUDED.foto, nombre = EXCLUDED.nombre`,
-      [email, telefono || null, foto || null, nombre || null]
+      `INSERT INTO usuarios (email, telefono, foto, nombre, ciudad) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono, foto = EXCLUDED.foto, nombre = EXCLUDED.nombre, ciudad = COALESCE(EXCLUDED.ciudad, usuarios.ciudad)`,
+      [email, telefono || null, foto || null, nombre || null, ciudad || null]
     );
 
     await pool.query(
-      `INSERT INTO servicios (email, tipo, nombre, estado) VALUES ($1, 'ofrece', $2, 'activo'), ($1, 'necesita', $3, 'activo')
-       ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo', updated_at = NOW()`,
-      [email, ofrece, necesita]
+      `INSERT INTO servicios (email, tipo, nombre, estado, remoto) VALUES ($1, 'ofrece', $2, 'activo', $4), ($1, 'necesita', $3, 'activo', FALSE)
+       ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo', updated_at = NOW(), remoto = EXCLUDED.remoto`,
+      [email, ofrece, necesita, !!ofreceRemoto]
     );
-
     const redes = await buscarRedesUsuario(email);
 
     if (redes.length > 0) {
@@ -502,7 +505,7 @@ app.get("/usuario/:email", async (req, res) => {
   const { email } = req.params;
   try {
     const { rows } = await pool.query(
-      `SELECT email, nombre, telefono, foto, acepto_politica, verificacion_estado, suspendido FROM usuarios WHERE email = $1`,
+      `SELECT email, nombre, telefono, foto, ciudad, acepto_politica, verificacion_estado, suspendido FROM usuarios WHERE email = $1`,
       [email]
     );
     res.json({ usuario: rows[0] || null });
@@ -513,18 +516,19 @@ app.get("/usuario/:email", async (req, res) => {
 });
 
 app.post("/usuario", async (req, res) => {
-  const { email, telefono, foto, nombre } = req.body;
+  const { email, telefono, foto, nombre, ciudad } = req.body;
   if (!email) {
     return res.status(400).json({ error: "Falta email" });
   }
   try {
     await pool.query(
-      `INSERT INTO usuarios (email, telefono, foto, nombre) VALUES ($1, $2, $3, $4)
+      `INSERT INTO usuarios (email, telefono, foto, nombre, ciudad) VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (email) DO UPDATE SET
          telefono = EXCLUDED.telefono,
          foto = COALESCE(EXCLUDED.foto, usuarios.foto),
-         nombre = COALESCE(EXCLUDED.nombre, usuarios.nombre)`,
-      [email, telefono || null, foto || null, nombre || null]
+         nombre = COALESCE(EXCLUDED.nombre, usuarios.nombre),
+         ciudad = COALESCE(EXCLUDED.ciudad, usuarios.ciudad)`,
+      [email, telefono || null, foto || null, nombre || null, ciudad || null]
     );
     res.json({ ok: true });
   } catch (err) {
