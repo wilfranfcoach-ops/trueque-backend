@@ -48,6 +48,33 @@ if (pushHabilitado) {
   );
 }
 
+async function notificarRedesNuevas(email, redes) {
+  if (!redes || redes.length === 0) return;
+  const nuevas = [];
+  for (const r of redes) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM notificaciones_red_enviadas WHERE email = $1 AND firma = $2`,
+      [email, r.firma]
+    );
+    if (rows.length === 0) nuevas.push(r);
+  }
+  if (nuevas.length === 0) return;
+
+  await enviarEmailRed(email, nuevas);
+  await enviarPush(email, {
+    title: nuevas.length === 1 ? "🎉 Se formó una red de trueque" : `🎉 Se formaron ${nuevas.length} redes de trueque`,
+    body: "Toca para ver los detalles de contacto",
+    url: "/"
+  });
+
+  for (const r of nuevas) {
+    await pool.query(
+      `INSERT INTO notificaciones_red_enviadas (email, firma) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [email, r.firma]
+    );
+  }
+}
+
 async function enviarPush(emailDestino, payload) {
   if (!pushHabilitado) {
     console.log("VAPID keys no configuradas, se omite notificacion push");
@@ -249,6 +276,12 @@ async function initDB() {
       detalle TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS notificaciones_red_enviadas (
+      email TEXT,
+      firma TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (email, firma)
+    );
 
     CREATE INDEX IF NOT EXISTS idx_servicios_email_tipo_estado ON servicios (email, tipo, estado);
     CREATE INDEX IF NOT EXISTS idx_servicios_tipo_estado ON servicios (tipo, estado);
@@ -408,7 +441,14 @@ async function buscarRedesUsuario(email) {
       return { ...p, telefono: "🔒", email: "🔒" }; // nunca se desbloquea desde esta cuenta
     });
 
-    resultados.push({ necesita: necesidad, red: redParaMostrar, firma, pagado, precio: PRECIO_RED_COP });
+    resultados.push({
+      necesita: necesidad,
+      red: redParaMostrar,
+      firma,
+      pagado,
+      precio: PRECIO_RED_COP,
+      participantes: red.slice(1).map(p => p.email) // emails reales, sin enmascarar, solo para uso interno de notificaciones
+    });
   }
   return resultados;
 }
@@ -432,14 +472,23 @@ app.post("/buscar-red", async (req, res) => {
       [email, ofrece, necesita, !!ofreceRemoto]
     );
     const redes = await buscarRedesUsuario(email);
+    await notificarRedesNuevas(email, redes);
 
-    if (redes.length > 0) {
-      enviarEmailRed(email, redes);
-      enviarPush(email, {
-        title: redes.length === 1 ? "🎉 Se formó una red de trueque" : `🎉 Se formaron ${redes.length} redes de trueque`,
-        body: "Toca para ver los detalles de contacto",
-        url: "/"
+    // Avisar tambien a los demas participantes de cada red recien encontrada,
+    // no solo a quien acaba de publicar el servicio.
+    const participantes = new Set();
+    redes.forEach(r => {
+      (r.participantes || []).forEach(p => {
+        if (p && p !== email) participantes.add(p);
       });
+    });
+    for (const participante of participantes) {
+      try {
+        const redesParticipante = await buscarRedesUsuario(participante);
+        await notificarRedesNuevas(participante, redesParticipante);
+      } catch (err) {
+        console.error(`Error notificando a ${participante}:`, err.message);
+      }
     }
 
     res.json({ redes });
