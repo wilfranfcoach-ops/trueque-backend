@@ -754,12 +754,12 @@ app.post("/crear-pago-red", async (req, res) => {
       [email, firma, referencia, PRECIO_RED_COP]
     );
 
+    const redirectUrl = "https://truequedefavores.com/";
+    const urlPago = `https://checkout.wompi.co/p/?public-key=${WOMPI_PUBLIC_KEY}&currency=COP&amount-in-cents=${amountInCents}&reference=${referencia}&signature:integrity=${signature}&redirect-url=${encodeURIComponent(redirectUrl)}`;
+
     res.json({
       reference: referencia,
-      amountInCents,
-      currency: "COP",
-      publicKey: WOMPI_PUBLIC_KEY,
-      signature
+      urlPago
     });
   } catch (err) {
     console.error(err);
