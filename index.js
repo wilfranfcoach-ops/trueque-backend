@@ -142,6 +142,43 @@ async function enviarEmailRed(emailDestino, redes) {
     console.error("Error enviando email:", err.message);
   }
 }
+const PALABRAS_BLOQUEADAS = [
+  "sexo", "sexual", "escort", "prepago", "prostitucion", "prostituta",
+  "droga", "drogas", "marihuana", "cocaina", "sicariato", "sicario",
+  "arma", "armas", "matar", "asesinar"
+];
+
+function contieneTerminoBloqueado(texto) {
+  const limpio = texto.toLowerCase();
+  return PALABRAS_BLOQUEADAS.some(palabra => limpio.includes(palabra));
+}
+
+async function contenidoInapropiado(texto) {
+  // Primera capa: chequeo rapido de palabras obvias, sin gastar llamada a la IA
+  if (contieneTerminoBloqueado(texto)) return true;
+
+  // Segunda capa: la IA evalua intencion, incluso si esta disfrazada o mal escrita
+  try {
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      temperature: 0,
+      messages: [{
+        role: "user",
+        content: `Evalua este texto que alguien quiere publicar como servicio en una app de intercambio de servicios entre vecinos: "${texto}"
+
+¿Contiene contenido sexual, insinuaciones sexuales, violencia, groserias, insultos, o actividades ilegales (drogas, armas, etc.)?
+
+Responde SOLO con una palabra: "si" o "no".`
+      }],
+      max_tokens: 5
+    });
+    const respuesta = completion.choices[0].message.content.trim().toLowerCase();
+    return respuesta.includes("si");
+  } catch (err) {
+    console.error("Error moderando contenido:", err.message);
+    return false; // si falla la IA, no bloqueamos por error tecnico (el filtro de palabras ya actuo)
+  }
+}
 
 async function encontrarCandidatosSemanticos(necesita, candidatos) {
   if (candidatos.length === 0) return [];
@@ -457,6 +494,16 @@ app.post("/buscar-red", async (req, res) => {
   const { email, ofrece, necesita, telefono, foto, nombre, ciudad, ofreceRemoto } = req.body;
   if (!email || !ofrece || !necesita) {
     return res.status(400).json({ error: "Faltan datos" });
+  }
+
+  const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
+    contenidoInapropiado(ofrece),
+    contenidoInapropiado(necesita)
+  ]);
+  if (ofreceInapropiado || necesitaInapropiado) {
+    return res.status(400).json({
+      error: "Tu publicación no cumple con las normas de la comunidad. Evita contenido sexual, violento, o groserías."
+    });
   }
 
   try {
