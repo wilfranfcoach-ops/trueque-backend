@@ -180,6 +180,39 @@ Responde SOLO con una palabra: "si" o "no".`
   }
 }
 
+async function encontrarServicioDuplicado(textoNuevo, serviciosExistentes) {
+  if (serviciosExistentes.length === 0) return null;
+  try {
+    const lista = serviciosExistentes.map(s => `- "${s}"`).join("\n");
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      temperature: 0,
+      messages: [{
+        role: "user",
+        content: `Una persona ya tiene registrados estos servicios:
+${lista}
+
+Ahora quiere registrar este nuevo texto: "${textoNuevo}"
+
+¿Es el MISMO servicio que alguno de los de la lista, solo redactado distinto (sinonimos, mas o menos detalle, orden de palabras)? Por ejemplo "Clases de Excel" y "Dicto clases de Excel" SI son el mismo. "Clases de Excel" y "Clases de Word" NO son el mismo.
+
+Si coincide con alguno, responde copiando EXACTAMENTE ese texto existente entre comillas, tal cual esta en la lista arriba.
+Si no coincide con ninguno, responde solo: ninguno`
+      }],
+      max_tokens: 60
+    });
+    const texto = completion.choices[0].message.content.trim();
+    if (texto.toLowerCase().includes("ninguno")) return null;
+
+    const limpio = texto.replace(/["\-•\s]+$/g, "").replace(/^["\-•\s]+/g, "").trim().toLowerCase();
+    const encontrado = serviciosExistentes.find(s => s.trim().toLowerCase() === limpio);
+    return encontrado || null;
+  } catch (err) {
+    console.error("Error detectando duplicado:", err.message);
+    return null;
+  }
+}
+
 async function encontrarCandidatosSemanticos(necesita, candidatos) {
   if (candidatos.length === 0) return [];
   try {
@@ -456,7 +489,7 @@ async function buscarRedesUsuario(email) {
   for (const { necesidad, red } of busquedas) {
     if (!red || red.length < 2) continue; // una red valida siempre tiene al menos origen + 1 eslabon
 
-    // El "siguiente eslabon" es la unica persona a la que este usuario le presta su servicio.
+    // El "siguiente eslabon" es la unica persona a la que este usuario le recibe su servicio.
     // Solo el contacto de ESA persona se bloquea/desbloquea con el pago de este usuario -
     // el resto de la cadena se muestra (foto+nombre) para dar contexto, pero nunca se desbloquea
     // desde esta cuenta (cada quien paga por su propio eslabon cuando entra a la suya).
@@ -496,7 +529,7 @@ app.post("/buscar-red", async (req, res) => {
     return res.status(400).json({ error: "Faltan datos" });
   }
 
-  const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
+const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
     contenidoInapropiado(ofrece),
     contenidoInapropiado(necesita)
   ]);
@@ -505,6 +538,27 @@ app.post("/buscar-red", async (req, res) => {
       error: "Tu publicación no cumple con las normas de la comunidad. Evita contenido sexual, violento, o groserías."
     });
   }
+
+  try {
+    const { rows: existentes } = await pool.query(
+      `SELECT tipo, nombre FROM servicios WHERE email = $1 AND estado = 'activo'`,
+      [email]
+    );
+    const ofertasExistentes = existentes.filter(s => s.tipo === "ofrece").map(s => s.nombre);
+    const necesidadesExistentes = existentes.filter(s => s.tipo === "necesita").map(s => s.nombre);
+
+    const [dupOfrece, dupNecesita] = await Promise.all([
+      encontrarServicioDuplicado(ofrece, ofertasExistentes),
+      encontrarServicioDuplicado(necesita, necesidadesExistentes)
+    ]);
+
+    if (dupOfrece || dupNecesita) {
+      return res.status(409).json({
+        duplicado: true,
+        mensajeOfrece: dupOfrece ? `Ya tienes registrado "${dupOfrece}", que es el mismo servicio.` : null,
+        mensajeNecesita: dupNecesita ? `Ya tienes registrado "${dupNecesita}", que es la misma necesidad.` : null
+      });
+    }
 
   try {
     await pool.query(
