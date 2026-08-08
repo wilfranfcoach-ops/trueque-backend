@@ -529,7 +529,7 @@ app.post("/buscar-red", async (req, res) => {
     return res.status(400).json({ error: "Faltan datos" });
   }
 
-const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
+  const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
     contenidoInapropiado(ofrece),
     contenidoInapropiado(necesita)
   ]);
@@ -560,7 +560,6 @@ const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
       });
     }
 
-  try {
     await pool.query(
       `INSERT INTO usuarios (email, telefono, foto, nombre, ciudad) VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (email) DO UPDATE SET telefono = EXCLUDED.telefono, foto = EXCLUDED.foto, nombre = EXCLUDED.nombre, ciudad = COALESCE(EXCLUDED.ciudad, usuarios.ciudad)`,
@@ -572,6 +571,7 @@ const [ofreceInapropiado, necesitaInapropiado] = await Promise.all([
        ON CONFLICT (email, tipo, nombre) DO UPDATE SET estado = 'activo', updated_at = NOW(), remoto = EXCLUDED.remoto`,
       [email, ofrece, necesita, !!ofreceRemoto]
     );
+
     const redes = await buscarRedesUsuario(email);
     await notificarRedesNuevas(email, redes);
 
